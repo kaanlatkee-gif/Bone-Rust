@@ -8,6 +8,7 @@
 //! - Pawn needs bars.
 //! - Ambush warning display.
 
+use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 
 use crate::events::GameTime;
@@ -99,7 +100,6 @@ fn setup_ui(mut commands: Commands) {
                     DayTimeText,
                 )]
             ),
-
             // ---------------------------------------------------------
             // Top-right: resources
             // ---------------------------------------------------------
@@ -122,7 +122,6 @@ fn setup_ui(mut commands: Commands) {
                     ResourceText,
                 )]
             ),
-
             // ---------------------------------------------------------
             // Bottom center: needs
             // ---------------------------------------------------------
@@ -136,9 +135,7 @@ fn setup_ui(mut commands: Commands) {
                     row_gap: px(6),
                     ..default()
                 },
-                UiTransform::from_translation(
-                    Val2::new(percent(-50), px(0)),
-                ),
+                UiTransform::from_translation(Val2::new(percent(-50), px(0)),),
                 children![
                     status_bar("Health", HealthBar),
                     status_bar("Hunger", HungerBar),
@@ -146,7 +143,6 @@ fn setup_ui(mut commands: Commands) {
                     status_bar("Mood", MoodBar),
                 ]
             ),
-
             // ---------------------------------------------------------
             // Center: ambush warning
             // ---------------------------------------------------------
@@ -157,9 +153,7 @@ fn setup_ui(mut commands: Commands) {
                     top: px(90),
                     ..default()
                 },
-                UiTransform::from_translation(
-                    Val2::new(percent(-50), px(0)),
-                ),
+                UiTransform::from_translation(Val2::new(percent(-50), px(0)),),
                 children![(
                     Text::new(""),
                     TextFont {
@@ -177,10 +171,7 @@ fn setup_ui(mut commands: Commands) {
 /// Build a labelled progress bar.
 ///
 /// The actual filled percentage is controlled by `update_status_bars`.
-fn status_bar<T: Component>(
-    label: &'static str,
-    marker: T,
-) -> impl Bundle {
+fn status_bar<T: Component>(label: &'static str, marker: T) -> impl Bundle {
     (
         Node {
             width: px(BAR_WIDTH),
@@ -223,10 +214,7 @@ fn status_bar<T: Component>(
     )
 }
 
-fn update_day_time(
-    game_time: Res<GameTime>,
-    mut query: Query<&mut Text, With<DayTimeText>>,
-) {
+fn update_day_time(game_time: Res<GameTime>, mut query: Query<&mut Text, With<DayTimeText>>) {
     if !game_time.is_changed() {
         return;
     }
@@ -239,12 +227,7 @@ fn update_day_time(
         return;
     };
 
-    **text = format!(
-        "Day {}  {:02}:{:02}",
-        day,
-        hour,
-        minute
-    );
+    **text = format!("Day {}  {:02}:{:02}", day, hour, minute);
 }
 
 fn update_resources(
@@ -261,27 +244,27 @@ fn update_resources(
 
     **text = format!(
         "🪵 Wood: {}   🪨 Stone: {}   🍎 Food: {}",
-        resources.wood,
-        resources.stone,
-        resources.food
+        resources.wood, resources.stone, resources.food
     );
 }
 
 fn update_status_bars(
     pawn_q: Query<&Pawn, With<PlayerPawn>>,
-    mut health_q: Query<&mut Node, With<HealthBar>>,
-    mut hunger_q: Query<&mut Node, With<HungerBar>>,
-    mut energy_q: Query<&mut Node, With<EnergyBar>>,
-    mut mood_q: Query<&mut Node, With<MoodBar>>,
+    mut bars: ParamSet<(
+        Query<&mut Node, With<HealthBar>>,
+        Query<&mut Node, With<HungerBar>>,
+        Query<&mut Node, With<EnergyBar>>,
+        Query<&mut Node, With<MoodBar>>,
+    )>,
 ) {
     let Ok(pawn) = pawn_q.single() else {
         return;
     };
 
-    set_bar(&mut health_q, pawn.needs.health);
-    set_bar(&mut hunger_q, pawn.needs.hunger);
-    set_bar(&mut energy_q, pawn.needs.energy);
-    set_bar(&mut mood_q, pawn.needs.mood);
+    set_bar(&mut bars.p0(), pawn.needs.health);
+    set_bar(&mut bars.p1(), pawn.needs.hunger);
+    set_bar(&mut bars.p2(), pawn.needs.energy);
+    set_bar(&mut bars.p3(), pawn.needs.mood);
 }
 
 fn set_bar<F: QueryFilter>(query: &mut Query<&mut Node, F>, value: f32) {

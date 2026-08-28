@@ -14,13 +14,7 @@
 use bevy::prelude::*;
 
 use crate::events::{DamagePawnEvent, TileChangedEvent};
-use crate::map::{
-    depth_z,
-    grid_to_screen,
-    MapData,
-    Tile,
-    Z_LAYER_PAWN,
-};
+use crate::map::{depth_z, grid_to_screen, MapData, Tile, Z_LAYER_PAWN};
 use crate::ui::ColonyResource;
 
 const NEED_DECAY_PER_SECOND: f32 = 0.5;
@@ -142,21 +136,14 @@ impl Default for Enemy {
 }
 
 /// Spawn the single player pawn.
-fn setup_pawn(
-    mut commands: Commands,
-    textures: Res<crate::map::GameTextures>,
-) {
+fn setup_pawn(mut commands: Commands, asset_server: Res<AssetServer>) {
     let start = GridPosition::new(3, 3);
     let screen = grid_to_screen(start.x, start.y);
 
-    let position = Vec3::new(
-        screen.x,
-        screen.y,
-        depth_z(start.x, start.y, Z_LAYER_PAWN),
-    );
+    let position = Vec3::new(screen.x, screen.y, depth_z(start.x, start.y, Z_LAYER_PAWN));
 
     commands.spawn((
-        Sprite::from_image(textures.pawn.clone()),
+        Sprite::from_image(asset_server.load("textures/pawn.png")),
         Transform::from_translation(position),
         Pawn {
             needs: PawnNeeds::default(),
@@ -176,14 +163,7 @@ fn setup_pawn(
 fn pawn_input(
     keyboard: Res<ButtonInput<KeyCode>>,
     map: Res<MapData>,
-    mut pawn_q: Query<
-        (
-            &mut GridPosition,
-            &mut PawnMovement,
-            &Transform,
-        ),
-        With<PlayerPawn>,
-    >,
+    mut pawn_q: Query<(&mut GridPosition, &mut PawnMovement, &Transform), With<PlayerPawn>>,
 ) {
     let Ok((mut grid, mut movement, transform)) = pawn_q.single_mut() else {
         return;
@@ -197,21 +177,13 @@ fn pawn_input(
 
     let mut delta = IVec2::ZERO;
 
-    if keyboard.just_pressed(KeyCode::KeyW)
-        || keyboard.just_pressed(KeyCode::ArrowUp)
-    {
+    if keyboard.just_pressed(KeyCode::KeyW) || keyboard.just_pressed(KeyCode::ArrowUp) {
         delta.y -= 1;
-    } else if keyboard.just_pressed(KeyCode::KeyS)
-        || keyboard.just_pressed(KeyCode::ArrowDown)
-    {
+    } else if keyboard.just_pressed(KeyCode::KeyS) || keyboard.just_pressed(KeyCode::ArrowDown) {
         delta.y += 1;
-    } else if keyboard.just_pressed(KeyCode::KeyA)
-        || keyboard.just_pressed(KeyCode::ArrowLeft)
-    {
+    } else if keyboard.just_pressed(KeyCode::KeyA) || keyboard.just_pressed(KeyCode::ArrowLeft) {
         delta.x -= 1;
-    } else if keyboard.just_pressed(KeyCode::KeyD)
-        || keyboard.just_pressed(KeyCode::ArrowRight)
-    {
+    } else if keyboard.just_pressed(KeyCode::KeyD) || keyboard.just_pressed(KeyCode::ArrowRight) {
         delta.x += 1;
     }
 
@@ -297,9 +269,7 @@ fn tick_needs(
         pawn.needs.health -= STARVATION_DAMAGE_PER_SECOND * dt;
     }
 
-    let current_tile = map
-        .get(position.x, position.y)
-        .unwrap_or(Tile::Grass);
+    let current_tile = map.get(position.x, position.y).unwrap_or(Tile::Grass);
 
     if pawn.needs.hunger < 20.0 || pawn.needs.energy < 20.0 {
         pawn.needs.mood -= LOW_NEED_MOOD_LOSS_PER_SECOND * dt;
@@ -334,12 +304,7 @@ fn harvest_adjacent(
     };
 
     // Check the four cardinal neighbors.
-    const DIRECTIONS: [(i32, i32); 4] = [
-        (0, -1),
-        (1, 0),
-        (0, 1),
-        (-1, 0),
-    ];
+    const DIRECTIONS: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
     for (dx, dy) in DIRECTIONS {
         let x = pawn_position.x + dx;
@@ -391,8 +356,7 @@ fn receive_damage(
     };
 
     for event in events.read() {
-        pawn.needs.health =
-            (pawn.needs.health - event.amount.max(0.0)).clamp(0.0, 100.0);
+        pawn.needs.health = (pawn.needs.health - event.amount.max(0.0)).clamp(0.0, 100.0);
     }
 }
 
@@ -400,16 +364,15 @@ pub struct PawnPlugin;
 
 impl Plugin for PawnPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_pawn.after(crate::map::setup_map))
-            .add_systems(
-                Update,
-                (
-                    pawn_input,
-                    smooth_pawn_movement,
-                    tick_needs,
-                    harvest_adjacent,
-                    receive_damage,
-                ),
-            );
+        app.add_systems(Startup, setup_pawn).add_systems(
+            Update,
+            (
+                pawn_input,
+                smooth_pawn_movement,
+                tick_needs,
+                harvest_adjacent,
+                receive_damage,
+            ),
+        );
     }
 }

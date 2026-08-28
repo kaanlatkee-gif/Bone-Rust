@@ -12,23 +12,11 @@
 //! - Move enemies toward the single player pawn.
 //! - Damage the pawn when an enemy reaches them.
 
-use bevy::prelude::*;
-
-use crate::map::{
-    depth_z,
-    grid_to_screen,
-    GameTextures,
-    MapData,
-    Tile,
-    Z_LAYER_PAWN,
-};
-use crate::pawn::{
-    Enemy,
-    GridPosition,
-    Pawn,
-    PlayerPawn,
-};
+use crate::map::MapData;
+use crate::map::{depth_z, grid_to_screen, GameTextures, Tile, Z_LAYER_PAWN};
+use crate::pawn::{Enemy, GridPosition, PlayerPawn};
 use crate::ui::ColonyResource;
+use bevy::prelude::*;
 
 /// Simulation tick rate.
 ///
@@ -99,15 +87,10 @@ impl GameTime {
 }
 
 /// Advance the game clock.
-fn tick_game_time(
-    time: Res<Time>,
-    mut game_time: ResMut<GameTime>,
-) {
-    game_time.total_minutes +=
-        time.delta_secs() * GAME_MINUTES_PER_REAL_SECOND;
+fn tick_game_time(time: Res<Time>, mut game_time: ResMut<GameTime>) {
+    game_time.total_minutes += time.delta_secs() * GAME_MINUTES_PER_REAL_SECOND;
 
-    game_time.ambush_warning_timer =
-        (game_time.ambush_warning_timer - time.delta_secs()).max(0.0);
+    game_time.ambush_warning_timer = (game_time.ambush_warning_timer - time.delta_secs()).max(0.0);
 }
 
 /// Simple deterministic pseudo-random value.
@@ -136,27 +119,21 @@ fn pseudo_random(day: u32) -> f32 {
 /// - Wealth cannot by itself guarantee a raid.
 ///
 /// Final probability is clamped to a sensible range.
-fn calculate_ambush_chance(
-    day: u32,
-    resources: &ColonyResource,
-) -> f32 {
+fn calculate_ambush_chance(day: u32, resources: &ColonyResource) -> f32 {
     if day < 5 {
         return 0.0;
     }
 
     let days_after_protection = day.saturating_sub(5) as f32;
 
-    let time_factor =
-        (0.08 + days_after_protection * 0.025).clamp(0.08, 0.45);
+    let time_factor = (0.08 + days_after_protection * 0.025).clamp(0.08, 0.45);
 
     let wealth = resources.total_wealth() as f32;
 
     // 500 wealth produces roughly half of the maximum wealth bonus.
-    let wealth_factor =
-        (wealth / (wealth + 500.0)).clamp(0.0, 0.75);
+    let wealth_factor = (wealth / (wealth + 500.0)).clamp(0.0, 0.75);
 
-    let combined =
-        time_factor + wealth_factor * 0.25;
+    let combined = time_factor + wealth_factor * 0.25;
 
     combined.clamp(0.0, 0.65)
 }
@@ -189,13 +166,7 @@ fn daily_storyteller(
         return;
     }
 
-    spawn_ambush(
-        &mut commands,
-        &mut game_time,
-        &map,
-        &textures,
-        day,
-    );
+    spawn_ambush(&mut commands, &mut game_time, &map, &textures, day);
 }
 
 /// Spawn an ambush from an outer map edge.
@@ -212,10 +183,7 @@ fn spawn_ambush(
         (0, 0),
         (map.width as i32 - 1, 0),
         (0, map.height as i32 - 1),
-        (
-            map.width as i32 - 1,
-            map.height as i32 - 1,
-        ),
+        (map.width as i32 - 1, map.height as i32 - 1),
     ];
 
     // Deterministically rotate spawn corner by day.
@@ -231,17 +199,12 @@ fn spawn_ambush(
 
     commands.spawn((
         Sprite::from_image(textures.pawn.clone()),
-        Transform::from_xyz(
-            position.x,
-            position.y,
-            depth_z(x, y, Z_LAYER_PAWN + 0.01),
-        ),
+        Transform::from_xyz(position.x, position.y, depth_z(x, y, Z_LAYER_PAWN + 0.01)),
         GridPosition { x, y },
         Enemy::default(),
     ));
 
-    game_time.active_enemies =
-        game_time.active_enemies.saturating_add(1);
+    game_time.active_enemies = game_time.active_enemies.saturating_add(1);
 
     // The warning persists long enough to be useful to the player.
     game_time.ambush_warning_timer = 8.0;
@@ -257,20 +220,15 @@ fn spawn_ambush(
 fn enemy_ai(
     time: Res<Time>,
     map: Res<MapData>,
-    pawn_q: Query<&GridPosition, With<PlayerPawn>>,
-    mut enemies: Query<(
-        &mut GridPosition,
-        &mut Transform,
-        &mut Enemy,
-    )>,
+    mut enemies: Query<(&mut GridPosition, &mut Transform, &mut Enemy), With<Enemy>>,
+    pawn: Query<&GridPosition, (With<PlayerPawn>, Without<Enemy>)>,
     mut damage_events: MessageWriter<DamagePawnEvent>,
 ) {
-    let Ok(player_position) = pawn_q.single() else {
+    let Ok(player_position) = pawn.single() else {
         return;
     };
 
-    for (mut enemy_position, mut transform, mut enemy) in enemies.iter_mut()
-    {
+    for (mut enemy_position, mut transform, mut enemy) in enemies.iter_mut() {
         enemy.move_timer += time.delta_secs();
 
         if enemy.move_timer < enemy.move_interval {
@@ -294,26 +252,18 @@ fn enemy_ai(
         let mut candidates = Vec::with_capacity(2);
 
         if dx != 0 {
-            candidates.push((
-                enemy_position.x + dx.signum(),
-                enemy_position.y,
-            ));
+            candidates.push((enemy_position.x + dx.signum(), enemy_position.y));
         }
 
         if dy != 0 {
-            candidates.push((
-                enemy_position.x,
-                enemy_position.y + dy.signum(),
-            ));
+            candidates.push((enemy_position.x, enemy_position.y + dy.signum()));
         }
 
         let mut moved = false;
 
         // Prefer the candidate that reduces Manhattan distance the most.
-        candidates.sort_by_key(|&(x, y)| {
-            (x - player_position.x).abs()
-                + (y - player_position.y).abs()
-        });
+        candidates
+            .sort_by_key(|&(x, y)| (x - player_position.x).abs() + (y - player_position.y).abs());
 
         for (next_x, next_y) in candidates {
             if !map.in_bounds(next_x, next_y) {
@@ -336,11 +286,7 @@ fn enemy_ai(
             transform.translation = Vec3::new(
                 screen.x,
                 screen.y,
-                depth_z(
-                    next_x,
-                    next_y,
-                    Z_LAYER_PAWN + 0.01,
-                ),
+                depth_z(next_x, next_y, Z_LAYER_PAWN + 0.01),
             );
 
             moved = true;
@@ -393,4 +339,3 @@ impl Plugin for EventsPlugin {
             );
     }
 }
-```
