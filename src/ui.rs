@@ -93,7 +93,7 @@ fn setup_ui(mut commands: Commands) {
                 children![(
                     Text::new("Day 1  00:00"),
                     TextFont {
-                        font_size: 20.0_f32.into(),
+                        font_size: 20.0,
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -115,7 +115,7 @@ fn setup_ui(mut commands: Commands) {
                 children![(
                     Text::new("Wood: 0   Stone: 0   Food: 0"),
                     TextFont {
-                        font_size: 20.0_f32.into(),
+                        font_size: 20.0,
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -135,7 +135,7 @@ fn setup_ui(mut commands: Commands) {
                     row_gap: px(6),
                     ..default()
                 },
-                UiTransform::from_translation(Val2::new(percent(-50), px(0)),),
+                UiTransform::from_translation(Val2::percent(-50.0, 0.0)),
                 children![
                     status_bar("Health", HealthBar),
                     status_bar("Hunger", HungerBar),
@@ -153,11 +153,11 @@ fn setup_ui(mut commands: Commands) {
                     top: px(90),
                     ..default()
                 },
-                UiTransform::from_translation(Val2::new(percent(-50), px(0)),),
+                UiTransform::from_translation(Val2::percent(-50.0, 0.0)),
                 children![(
                     Text::new(""),
                     TextFont {
-                        font_size: 34.0_f32.into(),
+                        font_size: 34.0,
                         ..default()
                     },
                     TextColor(Color::srgb(1.0, 0.1, 0.1).into()),
@@ -204,7 +204,7 @@ fn status_bar<T: Component>(label: &'static str, marker: T) -> impl Bundle {
                 children![(
                     Text::new(label),
                     TextFont {
-                        font_size: 13.0_f32.into(),
+                        font_size: 13.0,
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -261,10 +261,25 @@ fn update_status_bars(
         return;
     };
 
-    set_bar(&mut bars.p0(), pawn.needs.health);
-    set_bar(&mut bars.p1(), pawn.needs.hunger);
-    set_bar(&mut bars.p2(), pawn.needs.energy);
-    set_bar(&mut bars.p3(), pawn.needs.mood);
+    {
+        let mut health_bar = bars.p0();
+        set_bar(&mut health_bar, pawn.needs.health);
+    }
+
+    {
+        let mut hunger_bar = bars.p1();
+        set_bar(&mut hunger_bar, pawn.needs.hunger);
+    }
+
+    {
+        let mut energy_bar = bars.p2();
+        set_bar(&mut energy_bar, pawn.needs.energy);
+    }
+
+    {
+        let mut mood_bar = bars.p3();
+        set_bar(&mut mood_bar, pawn.needs.mood);
+    }
 }
 
 fn set_bar<F: QueryFilter>(query: &mut Query<&mut Node, F>, value: f32) {

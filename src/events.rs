@@ -93,18 +93,24 @@ fn tick_game_time(time: Res<Time>, mut game_time: ResMut<GameTime>) {
     game_time.ambush_warning_timer = (game_time.ambush_warning_timer - time.delta_secs()).max(0.0);
 }
 
-/// Simple deterministic pseudo-random value.
+/// Simple deterministic pseudo-random value in the range `0.0..1.0`.
 ///
-/// We avoid requiring another RNG dependency for the core system.
-/// This is not cryptographic randomness, nor does it need to be.
+/// We avoid requiring another RNG dependency for the core system. This uses
+/// SplitMix64-style integer mixing so nearby day numbers still spread across
+/// the full unit interval. A plain xorshift seeded directly from a small day
+/// number only filled the low bits, which made every post-protection ambush
+/// roll effectively zero.
 fn pseudo_random(day: u32) -> f32 {
     let mut value = day as u64;
 
-    value ^= value << 13;
-    value ^= value >> 17;
-    value ^= value << 5;
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
 
-    (value as f64 / u64::MAX as f64) as f32
+    // Use the upper 53 bits, matching the precision commonly used to turn a
+    // u64 into a floating point value without ever producing 1.0.
+    ((value >> 11) as f64 / (1u64 << 53) as f64) as f32
 }
 
 /// Calculate the probability that today's storyteller event becomes
@@ -216,7 +222,8 @@ fn spawn_ambush(
 /// A* implementation. For a small 16x16 map it is deterministic,
 /// cheap, and adequate for the requested basic tracking AI.
 ///
-/// Walls are avoided when possible.
+/// Blocked tiles are avoided when possible. If the direct route is blocked,
+/// enemies try the best available sidestep instead of getting stuck.
 fn enemy_ai(
     time: Res<Time>,
     map: Res<MapData>,
@@ -249,8 +256,10 @@ fn enemy_ai(
         let dx = player_position.x - enemy_position.x;
         let dy = player_position.y - enemy_position.y;
 
-        let mut candidates = Vec::with_capacity(2);
+        let mut candidates = Vec::with_capacity(4);
 
+        // Try direct moves first so equal-distance choices remain stable and
+        // intuitive, then add the remaining cardinal sidesteps as fallbacks.
         if dx != 0 {
             candidates.push((enemy_position.x + dx.signum(), enemy_position.y));
         }
@@ -259,9 +268,17 @@ fn enemy_ai(
             candidates.push((enemy_position.x, enemy_position.y + dy.signum()));
         }
 
-        let mut moved = false;
+        const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
-        // Prefer the candidate that reduces Manhattan distance the most.
+        for (step_x, step_y) in DIRECTIONS {
+            let candidate = (enemy_position.x + step_x, enemy_position.y + step_y);
+
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+
+        // Prefer the candidate that ends nearest to the player.
         candidates
             .sort_by_key(|&(x, y)| (x - player_position.x).abs() + (y - player_position.y).abs());
 
@@ -289,14 +306,14 @@ fn enemy_ai(
                 depth_z(next_x, next_y, Z_LAYER_PAWN + 0.01),
             );
 
-            moved = true;
             break;
         }
 
-        // If no movement was possible, leave the enemy in place.
-        let _ = moved;
-
-        if enemy_position.adjacent_to(*player_position) {
+        // If no movement was possible, leave the enemy in place. Deal damage
+        // only once the enemy actually reaches the pawn's tile; the previous
+        // adjacent-tile check caused attacks to land one step too early and
+        // delayed damage when the enemy entered the pawn tile.
+        if *enemy_position == *player_position {
             damage_events.write(DamagePawnEvent {
                 amount: enemy.damage,
             });
@@ -318,6 +335,34 @@ fn cleanup_dead_enemies(
     // Keeping the query here also makes adding EnemyHealth later local
     // to this module instead of requiring architectural changes.
     let _ = (&mut commands, &mut game_time, &enemies);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pseudo_random_values_cover_the_unit_interval() {
+        let rolls: Vec<f32> = (5..40).map(pseudo_random).collect();
+
+        assert!(rolls.iter().all(|roll| (0.0..1.0).contains(roll)));
+        assert!(rolls.iter().any(|roll| *roll < 0.1));
+        assert!(rolls.iter().any(|roll| *roll > 0.9));
+    }
+
+    #[test]
+    fn ambush_chance_respects_early_game_protection_and_cap() {
+        let poor_colony = ColonyResource::default();
+        let rich_colony = ColonyResource {
+            wood: u32::MAX,
+            stone: u32::MAX,
+            food: u32::MAX,
+        };
+
+        assert_eq!(calculate_ambush_chance(4, &poor_colony), 0.0);
+        assert!(calculate_ambush_chance(5, &poor_colony) > 0.0);
+        assert!(calculate_ambush_chance(100, &rich_colony) <= 0.65);
+    }
 }
 
 /// Register event/message types and systems.

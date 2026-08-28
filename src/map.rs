@@ -38,7 +38,7 @@ pub enum Tile {
 
 impl Tile {
     pub fn is_walkable(self) -> bool {
-        !matches!(self, Tile::Wall)
+        matches!(self, Tile::Grass | Tile::Bed)
     }
 
     pub fn is_harvestable(self) -> bool {
@@ -146,6 +146,14 @@ pub struct TileVisual {
     pub y: i32,
 }
 
+/// Permanent grass base for a map tile.
+#[derive(Component)]
+struct TileBaseVisual;
+
+/// Optional non-grass content layered on top of a tile base.
+#[derive(Component)]
+struct TileContentVisual;
+
 /// Highlight sprite placed over the currently hovered tile.
 #[derive(Component)]
 pub struct TileHighlight;
@@ -195,16 +203,14 @@ pub fn depth_z(x: i32, y: i32, layer_offset: f32) -> f32 {
 }
 
 fn setup_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<MapData>) {
-    commands.spawn(
-        ((
-            Camera2d,
-            Transform::from_xyz(0.0, 240.0, 1000.0),
-            OrthographicProjection {
-                scale: 0.5,
-                ..OrthographicProjection::default_2d()
-            },
-        )),
-    );
+    commands.spawn((
+        Camera2d,
+        Transform::from_xyz(0.0, 240.0, 1000.0),
+        Projection::Orthographic(OrthographicProjection {
+            scale: 0.5,
+            ..OrthographicProjection::default_2d()
+        }),
+    ));
     let textures = GameTextures {
         grass: asset_server.load("textures/grass.png"),
         tree: asset_server.load("textures/tree.png"),
@@ -222,33 +228,27 @@ fn setup_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<Ma
             let tile = map.get(x, y).unwrap_or(Tile::Grass);
             let screen = grid_to_screen(x, y);
 
-            // Every occupied terrain tile receives a grass base.
-            // This prevents transparent structures from leaving holes.
+            // Every tile receives a permanent grass base. Non-grass terrain
+            // and structures are drawn as a separate content layer. Keeping
+            // these layers separate prevents harvested trees/rocks from
+            // turning both sprites into grass and z-fighting each other.
+            commands.spawn((
+                Sprite::from_image(textures.grass.clone()),
+                Transform::from_xyz(screen.x, screen.y, depth_z(x, y, Z_LAYER_TERRAIN)),
+                Visibility::Visible,
+                TileVisual { x, y },
+                TileBaseVisual,
+            ));
+
             if tile != Tile::Grass {
                 commands.spawn((
-                    Sprite::from_image(textures.grass.clone()),
-                    Transform::from_xyz(screen.x, screen.y, depth_z(x, y, Z_LAYER_TERRAIN)),
+                    Sprite::from_image(textures.texture_for(tile)),
+                    Transform::from_xyz(screen.x, screen.y, depth_z(x, y, Z_LAYER_STRUCTURE)),
+                    Visibility::Visible,
                     TileVisual { x, y },
+                    TileContentVisual,
                 ));
             }
-
-            commands.spawn((
-                Sprite::from_image(textures.texture_for(tile)),
-                Transform::from_xyz(
-                    screen.x,
-                    screen.y,
-                    depth_z(
-                        x,
-                        y,
-                        if tile == Tile::Grass {
-                            Z_LAYER_TERRAIN
-                        } else {
-                            Z_LAYER_STRUCTURE
-                        },
-                    ),
-                ),
-                TileVisual { x, y },
-            ));
         }
     }
 
@@ -320,31 +320,75 @@ fn mouse_picking(
 
 /// Update terrain sprite textures after a tile mutation.
 fn on_tile_changed(
+    mut commands: Commands,
     mut events: MessageReader<TileChangedEvent>,
     textures: Option<Res<GameTextures>>,
-    mut tile_q: Query<(&TileVisual, &mut Sprite, &mut Transform)>,
+    mut tile_q: Query<(Entity, &TileVisual, &mut Sprite, &mut Transform), With<TileContentVisual>>,
 ) {
     let Some(textures) = textures else {
         return;
     };
 
     for event in events.read() {
-        for (visual, mut sprite, mut transform) in tile_q.iter_mut() {
+        let mut content_entity = None;
+
+        for (entity, visual, mut sprite, mut transform) in tile_q.iter_mut() {
             if visual.x != event.x || visual.y != event.y {
                 continue;
             }
 
-            sprite.image = textures.texture_for(event.new_tile);
+            content_entity = Some(entity);
 
-            transform.translation.z = depth_z(
-                event.x,
-                event.y,
-                if event.new_tile == Tile::Grass {
-                    Z_LAYER_TERRAIN
-                } else {
-                    Z_LAYER_STRUCTURE
+            if event.new_tile == Tile::Grass {
+                commands.entity(entity).try_despawn();
+            } else {
+                sprite.image = textures.texture_for(event.new_tile);
+                transform.translation.z = depth_z(event.x, event.y, Z_LAYER_STRUCTURE);
+            }
+
+            break;
+        }
+
+        if content_entity.is_none() && event.new_tile != Tile::Grass {
+            let screen = grid_to_screen(event.x, event.y);
+
+            commands.spawn((
+                Sprite::from_image(textures.texture_for(event.new_tile)),
+                Transform::from_xyz(
+                    screen.x,
+                    screen.y,
+                    depth_z(event.x, event.y, Z_LAYER_STRUCTURE),
+                ),
+                Visibility::Visible,
+                TileVisual {
+                    x: event.x,
+                    y: event.y,
                 },
-            );
+                TileContentVisual,
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_tiles_are_not_walkable() {
+        assert!(Tile::Grass.is_walkable());
+        assert!(Tile::Bed.is_walkable());
+        assert!(!Tile::Tree.is_walkable());
+        assert!(!Tile::Rock.is_walkable());
+        assert!(!Tile::Wall.is_walkable());
+    }
+
+    #[test]
+    fn isometric_projection_round_trips_grid_centres() {
+        for y in 0..MAP_SIZE as i32 {
+            for x in 0..MAP_SIZE as i32 {
+                assert_eq!(screen_to_grid(grid_to_screen(x, y)), (x, y));
+            }
         }
     }
 }
