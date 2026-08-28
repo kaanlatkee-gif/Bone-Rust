@@ -71,10 +71,7 @@ impl Default for MapData {
         // Deterministic starter map.
         for y in 0..MAP_SIZE {
             for x in 0..MAP_SIZE {
-                let border = x == 0
-                    || y == 0
-                    || x == MAP_SIZE - 1
-                    || y == MAP_SIZE - 1;
+                let border = x == 0 || y == 0 || x == MAP_SIZE - 1 || y == MAP_SIZE - 1;
 
                 if border {
                     continue;
@@ -101,10 +98,7 @@ impl Default for MapData {
 
 impl MapData {
     pub fn in_bounds(&self, x: i32, y: i32) -> bool {
-        x >= 0
-            && y >= 0
-            && (x as usize) < self.width
-            && (y as usize) < self.height
+        x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height
     }
 
     pub fn get(&self, x: i32, y: i32) -> Option<Tile> {
@@ -170,10 +164,7 @@ pub fn grid_to_screen(x: i32, y: i32) -> Vec2 {
     let x = x as f32;
     let y = y as f32;
 
-    Vec2::new(
-        (x - y) * (TILE_WIDTH / 2.0),
-        (x + y) * (TILE_HEIGHT / 2.0),
-    )
+    Vec2::new((x - y) * (TILE_WIDTH / 2.0), (x + y) * (TILE_HEIGHT / 2.0))
 }
 
 /// Inverse of [`grid_to_screen`].
@@ -203,14 +194,17 @@ pub fn depth_z(x: i32, y: i32, layer_offset: f32) -> f32 {
     -(x + y) as f32 + layer_offset
 }
 
-pub(crate) fn setup_map(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    map: Res<MapData>,
-) {
-    // A centered 2D camera renders the isometric world; UI uses the default camera.
-    commands.spawn(Camera2d);
-
+fn setup_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<MapData>) {
+    commands.spawn(
+        ((
+            Camera2d,
+            Transform::from_xyz(0.0, 240.0, 1000.0),
+            OrthographicProjection {
+                scale: 0.5,
+                ..OrthographicProjection::default_2d()
+            },
+        )),
+    );
     let textures = GameTextures {
         grass: asset_server.load("textures/grass.png"),
         tree: asset_server.load("textures/tree.png"),
@@ -233,11 +227,7 @@ pub(crate) fn setup_map(
             if tile != Tile::Grass {
                 commands.spawn((
                     Sprite::from_image(textures.grass.clone()),
-                    Transform::from_xyz(
-                        screen.x,
-                        screen.y,
-                        depth_z(x, y, Z_LAYER_TERRAIN),
-                    ),
+                    Transform::from_xyz(screen.x, screen.y, depth_z(x, y, Z_LAYER_TERRAIN)),
                     TileVisual { x, y },
                 ));
             }
@@ -247,11 +237,15 @@ pub(crate) fn setup_map(
                 Transform::from_xyz(
                     screen.x,
                     screen.y,
-                    depth_z(x, y, if tile == Tile::Grass {
-                        Z_LAYER_TERRAIN
-                    } else {
-                        Z_LAYER_STRUCTURE
-                    }),
+                    depth_z(
+                        x,
+                        y,
+                        if tile == Tile::Grass {
+                            Z_LAYER_TERRAIN
+                        } else {
+                            Z_LAYER_STRUCTURE
+                        },
+                    ),
                 ),
                 TileVisual { x, y },
             ));
@@ -276,10 +270,7 @@ fn mouse_picking(
     camera_q: Query<(&Camera, &GlobalTransform)>,
     map: Res<MapData>,
     mut hovered: ResMut<HoveredTile>,
-    mut highlight_q: Query<
-        (&mut Transform, &mut Visibility),
-        With<TileHighlight>,
-    >,
+    mut highlight_q: Query<(&mut Transform, &mut Visibility), With<TileHighlight>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -299,9 +290,7 @@ fn mouse_picking(
         return;
     };
 
-    let Ok(world_position) =
-        camera.viewport_to_world_2d(camera_transform, cursor_position)
-    else {
+    let Ok(world_position) = camera.viewport_to_world_2d(camera_transform, cursor_position) else {
         return;
     };
 
@@ -367,9 +356,6 @@ impl Plugin for MapPlugin {
         app.init_resource::<MapData>()
             .init_resource::<HoveredTile>()
             .add_systems(Startup, setup_map)
-            .add_systems(Update, (
-                mouse_picking,
-                on_tile_changed,
-            ));
+            .add_systems(Update, (mouse_picking, on_tile_changed));
     }
 }
