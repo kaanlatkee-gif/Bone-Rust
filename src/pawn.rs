@@ -1,4 +1,3 @@
-```rust
 // src/pawn.rs
 //! Pawn module.
 //!
@@ -401,7 +400,7 @@ pub struct PawnPlugin;
 
 impl Plugin for PawnPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_pawn)
+        app.add_systems(Startup, setup_pawn.after(crate::map::setup_map))
             .add_systems(
                 Update,
                 (
@@ -414,4 +413,3 @@ impl Plugin for PawnPlugin {
             );
     }
 }
-```
