@@ -1,4 +1,3 @@
-```rust
 // src/map.rs
 //! Map module.
 //!
@@ -204,11 +203,14 @@ pub fn depth_z(x: i32, y: i32, layer_offset: f32) -> f32 {
     -(x + y) as f32 + layer_offset
 }
 
-fn setup_map(
+pub(crate) fn setup_map(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     map: Res<MapData>,
 ) {
+    // A centered 2D camera renders the isometric world; UI uses the default camera.
+    commands.spawn(Camera2d);
+
     let textures = GameTextures {
         grass: asset_server.load("textures/grass.png"),
         tree: asset_server.load("textures/tree.png"),
@@ -371,4 +373,3 @@ impl Plugin for MapPlugin {
             ));
     }
 }
-```

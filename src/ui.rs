@@ -1,4 +1,3 @@
-```rust
 // src/ui.rs
 //! UI module.
 //!
@@ -93,7 +92,7 @@ fn setup_ui(mut commands: Commands) {
                 children![(
                     Text::new("Day 1  00:00"),
                     TextFont {
-                        font_size: 20.0.into(),
+                        font_size: 20.0_f32.into(),
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -116,7 +115,7 @@ fn setup_ui(mut commands: Commands) {
                 children![(
                     Text::new("Wood: 0   Stone: 0   Food: 0"),
                     TextFont {
-                        font_size: 20.0.into(),
+                        font_size: 20.0_f32.into(),
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -164,7 +163,7 @@ fn setup_ui(mut commands: Commands) {
                 children![(
                     Text::new(""),
                     TextFont {
-                        font_size: 34.0.into(),
+                        font_size: 34.0_f32.into(),
                         ..default()
                     },
                     TextColor(Color::srgb(1.0, 0.1, 0.1).into()),
@@ -214,7 +213,7 @@ fn status_bar<T: Component>(
                 children![(
                     Text::new(label),
                     TextFont {
-                        font_size: 13.0.into(),
+                        font_size: 13.0_f32.into(),
                         ..default()
                     },
                     TextColor(Color::WHITE.into()),
@@ -285,7 +284,7 @@ fn update_status_bars(
     set_bar(&mut mood_q, pawn.needs.mood);
 }
 
-fn set_bar(query: &mut Query<&mut Node>, value: f32) {
+fn set_bar<F: QueryFilter>(query: &mut Query<&mut Node, F>, value: f32) {
     let Ok(mut node) = query.single_mut() else {
         return;
     };
@@ -325,4 +324,3 @@ impl Plugin for UiPlugin {
             );
     }
 }
-```
