@@ -205,7 +205,7 @@ pub fn depth_z(x: i32, y: i32, layer_offset: f32) -> f32 {
 fn setup_map(mut commands: Commands, asset_server: Res<AssetServer>, map: Res<MapData>) {
     commands.spawn((
         Camera2d,
-        Transform::from_xyz(0.0, 240.0, 1000.0),
+        Transform::from_xyz(0.0, 240.0, 0.0),
         Projection::Orthographic(OrthographicProjection {
             scale: 0.5,
             ..OrthographicProjection::default_2d()
