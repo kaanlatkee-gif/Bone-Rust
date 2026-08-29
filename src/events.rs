@@ -8,15 +8,20 @@
 //! - Emit pawn-damage messages.
 //! - Run the daily storyteller.
 //! - Calculate progressive ambush probability.
-//! - Spawn enemies at map edges.
-//! - Move enemies toward the single player pawn.
+//! - Spawn enemies around the player's current position (the world has no
+//!   fixed edges to spawn from anymore).
+//! - Chase the player continuously, respecting terrain hitboxes.
 //! - Damage the pawn when an enemy reaches them.
 
-use crate::map::MapData;
-use crate::map::{depth_z, grid_to_screen, GameTextures, Tile, Z_LAYER_PAWN};
-use crate::pawn::{Enemy, GridPosition, PlayerPawn};
-use crate::ui::ColonyResource;
+use std::f32::consts::TAU;
+
 use bevy::prelude::*;
+
+use crate::map::{
+    depth_z, grid_to_screen, is_position_blocked, GameTextures, MapData, Z_LAYER_PAWN,
+};
+use crate::pawn::{Enemy, PlayerPawn, WorldPosition};
+use crate::ui::ColonyResource;
 
 /// Simulation tick rate.
 ///
@@ -26,12 +31,22 @@ pub const GAME_MINUTES_PER_REAL_SECOND: f32 = 4.0;
 /// Number of minutes in a game day.
 pub const MINUTES_PER_DAY: f32 = 24.0 * 60.0;
 
+/// Collision radius used when an enemy tests whether a step would walk it
+/// into solid terrain.
+const ENEMY_COLLISION_RADIUS: f32 = 0.3;
+
+/// Distance (in tiles) at which an enemy can land an attack.
+const ENEMY_ATTACK_RANGE: f32 = 0.7;
+
+/// Distance from the player at which an ambush is spawned.
+const ENEMY_SPAWN_RADIUS: f32 = 14.0;
+
 /// A buffered tile mutation message.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct TileChangedEvent {
     pub x: i32,
     pub y: i32,
-    pub new_tile: Tile,
+    pub new_tile: crate::map::Tile,
 }
 
 /// Damage intended for the player pawn.
@@ -149,8 +164,8 @@ fn daily_storyteller(
     mut commands: Commands,
     mut game_time: ResMut<GameTime>,
     resources: Res<ColonyResource>,
-    map: Res<MapData>,
     textures: Res<GameTextures>,
+    pawn_q: Query<&WorldPosition, With<PlayerPawn>>,
 ) {
     let day = game_time.day();
 
@@ -172,41 +187,48 @@ fn daily_storyteller(
         return;
     }
 
-    spawn_ambush(&mut commands, &mut game_time, &map, &textures, day);
+    let Ok(player_position) = pawn_q.single() else {
+        return;
+    };
+
+    spawn_ambush(
+        &mut commands,
+        &mut game_time,
+        &textures,
+        day,
+        player_position.0,
+    );
 }
 
-/// Spawn an ambush from an outer map edge.
+/// Spawn an ambush at a fixed radius around the player.
 ///
-/// The first spawn point is selected from the four corners.
+/// The world has no edges to spawn from anymore, so ambushes instead ring
+/// in from a deterministic-but-varied direction around wherever the player
+/// currently is.
 fn spawn_ambush(
     commands: &mut Commands,
     game_time: &mut GameTime,
-    map: &MapData,
     textures: &GameTextures,
     day: u32,
+    player_position: Vec2,
 ) {
-    let spawn_points = [
-        (0, 0),
-        (map.width as i32 - 1, 0),
-        (0, map.height as i32 - 1),
-        (map.width as i32 - 1, map.height as i32 - 1),
-    ];
+    // A different mix than the ambush-chance roll, so the two don't
+    // correlate.
+    let angle = pseudo_random(day.wrapping_mul(7919).wrapping_add(11)) * TAU;
 
-    // Deterministically rotate spawn corner by day.
-    let index = (day as usize) % spawn_points.len();
+    let offset = Vec2::new(angle.cos(), angle.sin()) * ENEMY_SPAWN_RADIUS;
+    let spawn_position = player_position + offset;
 
-    let (x, y) = spawn_points[index];
-
-    if !map.in_bounds(x, y) {
-        return;
-    }
-
-    let position = grid_to_screen(x, y);
+    let screen = grid_to_screen(spawn_position.x, spawn_position.y);
 
     commands.spawn((
         Sprite::from_image(textures.pawn.clone()),
-        Transform::from_xyz(position.x, position.y, depth_z(x, y, Z_LAYER_PAWN + 0.01)),
-        GridPosition { x, y },
+        Transform::from_xyz(
+            screen.x,
+            screen.y,
+            depth_z(spawn_position.x, spawn_position.y, Z_LAYER_PAWN + 0.01),
+        ),
+        WorldPosition(spawn_position),
         Enemy::default(),
     ));
 
@@ -216,108 +238,59 @@ fn spawn_ambush(
     game_time.ambush_warning_timer = 8.0;
 }
 
-/// Move enemies toward the player's current tile.
+/// Move enemies toward the player's current position and attack once in
+/// range.
 ///
-/// This intentionally uses Manhattan movement instead of a full
-/// A* implementation. For a small 16x16 map it is deterministic,
-/// cheap, and adequate for the requested basic tracking AI.
-///
-/// Blocked tiles are avoided when possible. If the direct route is blocked,
-/// enemies try the best available sidestep instead of getting stuck.
+/// Enemies chase in a straight line rather than pathfinding - adequate for
+/// the open, mostly-sparse terrain this generates, and cheap regardless of
+/// how far the world extends. They still respect terrain hitboxes, so they
+/// can't walk through trees, rocks, or walls to reach the player.
 fn enemy_ai(
     time: Res<Time>,
     map: Res<MapData>,
-    mut enemies: Query<(&mut GridPosition, &mut Transform, &mut Enemy), With<Enemy>>,
-    pawn: Query<&GridPosition, (With<PlayerPawn>, Without<Enemy>)>,
+    mut enemies: Query<(&mut WorldPosition, &mut Transform, &mut Enemy), With<Enemy>>,
+    pawn: Query<&WorldPosition, (With<PlayerPawn>, Without<Enemy>)>,
     mut damage_events: MessageWriter<DamagePawnEvent>,
 ) {
     let Ok(player_position) = pawn.single() else {
         return;
     };
 
+    let player_position = player_position.0;
+
     for (mut enemy_position, mut transform, mut enemy) in enemies.iter_mut() {
-        enemy.move_timer += time.delta_secs();
+        enemy.attack_timer = (enemy.attack_timer - time.delta_secs()).max(0.0);
 
-        if enemy.move_timer < enemy.move_interval {
+        let to_player = player_position - enemy_position.0;
+        let distance = to_player.length();
+
+        if distance <= ENEMY_ATTACK_RANGE {
+            if enemy.attack_timer <= 0.0 {
+                damage_events.write(DamagePawnEvent {
+                    amount: enemy.damage,
+                });
+
+                enemy.attack_timer = enemy.attack_cooldown;
+            }
+
             continue;
         }
 
-        enemy.move_timer = 0.0;
+        let direction = to_player / distance.max(0.0001);
+        let delta = direction * enemy.speed * time.delta_secs();
+        let candidate = enemy_position.0 + delta;
 
-        // Already occupying the player's tile.
-        if *enemy_position == *player_position {
-            damage_events.write(DamagePawnEvent {
-                amount: enemy.damage,
-            });
-
-            continue;
+        if !is_position_blocked(&map, candidate, ENEMY_COLLISION_RADIUS) {
+            enemy_position.0 = candidate;
         }
 
-        let dx = player_position.x - enemy_position.x;
-        let dy = player_position.y - enemy_position.y;
+        let screen = grid_to_screen(enemy_position.0.x, enemy_position.0.y);
 
-        let mut candidates = Vec::with_capacity(4);
-
-        // Try direct moves first so equal-distance choices remain stable and
-        // intuitive, then add the remaining cardinal sidesteps as fallbacks.
-        if dx != 0 {
-            candidates.push((enemy_position.x + dx.signum(), enemy_position.y));
-        }
-
-        if dy != 0 {
-            candidates.push((enemy_position.x, enemy_position.y + dy.signum()));
-        }
-
-        const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
-
-        for (step_x, step_y) in DIRECTIONS {
-            let candidate = (enemy_position.x + step_x, enemy_position.y + step_y);
-
-            if !candidates.contains(&candidate) {
-                candidates.push(candidate);
-            }
-        }
-
-        // Prefer the candidate that ends nearest to the player.
-        candidates
-            .sort_by_key(|&(x, y)| (x - player_position.x).abs() + (y - player_position.y).abs());
-
-        for (next_x, next_y) in candidates {
-            if !map.in_bounds(next_x, next_y) {
-                continue;
-            }
-
-            let Some(tile) = map.get(next_x, next_y) else {
-                continue;
-            };
-
-            if !tile.is_walkable() {
-                continue;
-            }
-
-            enemy_position.x = next_x;
-            enemy_position.y = next_y;
-
-            let screen = grid_to_screen(next_x, next_y);
-
-            transform.translation = Vec3::new(
-                screen.x,
-                screen.y,
-                depth_z(next_x, next_y, Z_LAYER_PAWN + 0.01),
-            );
-
-            break;
-        }
-
-        // If no movement was possible, leave the enemy in place. Deal damage
-        // only once the enemy actually reaches the pawn's tile; the previous
-        // adjacent-tile check caused attacks to land one step too early and
-        // delayed damage when the enemy entered the pawn tile.
-        if *enemy_position == *player_position {
-            damage_events.write(DamagePawnEvent {
-                amount: enemy.damage,
-            });
-        }
+        transform.translation = Vec3::new(
+            screen.x,
+            screen.y,
+            depth_z(enemy_position.0.x, enemy_position.0.y, Z_LAYER_PAWN + 0.01),
+        );
     }
 }
 
@@ -325,7 +298,7 @@ fn enemy_ai(
 fn cleanup_dead_enemies(
     mut commands: Commands,
     mut game_time: ResMut<GameTime>,
-    enemies: Query<(Entity, &GridPosition), With<Enemy>>,
+    enemies: Query<(Entity, &WorldPosition), With<Enemy>>,
 ) {
     // Enemy death is currently represented by reaching the player's
     // tile repeatedly, but actual enemy health is deliberately outside

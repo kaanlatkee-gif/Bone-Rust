@@ -4,8 +4,8 @@
 //! Responsibilities:
 //! - Define the single player Pawn.
 //! - Track health, hunger, energy and mood.
-//! - Handle grid-based movement.
-//! - Smoothly interpolate movement in world space.
+//! - Handle free, continuous movement with real collision against terrain.
+//! - Keep a derived grid coordinate in sync for tile-based systems.
 //! - Simulate pawn needs.
 //! - Harvest adjacent trees and rocks.
 //! - Track whether the pawn is sleeping on a bed/raw ground.
@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 
 use crate::events::{DamagePawnEvent, TileChangedEvent};
-use crate::map::{depth_z, grid_to_screen, MapData, Tile, Z_LAYER_PAWN};
+use crate::map::{depth_z, grid_to_screen, is_position_blocked, MapData, Tile, Z_LAYER_PAWN};
 use crate::ui::ColonyResource;
 
 const NEED_DECAY_PER_SECOND: f32 = 0.5;
@@ -22,9 +22,17 @@ const STARVATION_DAMAGE_PER_SECOND: f32 = 2.0;
 const LOW_NEED_MOOD_LOSS_PER_SECOND: f32 = 1.0;
 const RAW_GROUND_SLEEP_MOOD_LOSS_PER_SECOND: f32 = 1.5;
 
-const MOVE_DURATION: f32 = 0.12;
+/// Movement speed in tiles per second. Movement is fully continuous - no
+/// grid-snapping, no cooldown between steps, no discrete tiles at all.
+const PAWN_SPEED: f32 = 4.0;
 
-/// A grid coordinate.
+/// Radius (in tile units) of the pawn's collision circle against terrain.
+const PAWN_COLLISION_RADIUS: f32 = 0.3;
+
+/// A grid coordinate - the tile an entity is currently considered to be
+/// "on" for tile-based systems (harvesting, sleeping checks). Derived each
+/// frame from the entity's continuous [`WorldPosition`], it is not the
+/// source of truth for rendering or movement anymore.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GridPosition {
     pub x: i32,
@@ -44,6 +52,12 @@ impl GridPosition {
         self.manhattan_distance(other) == 1
     }
 }
+
+/// Continuous world-space position, in tile units. This is the source of
+/// truth for movement, rendering, and collision for any entity that moves
+/// freely through the open world (the player, enemies).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct WorldPosition(pub Vec2);
 
 /// Player survival needs.
 ///
@@ -88,58 +102,37 @@ pub struct Pawn {
 #[derive(Component)]
 pub struct PlayerPawn;
 
-/// Movement interpolation state.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct PawnMovement {
-    pub from: Vec3,
-    pub to: Vec3,
-    pub elapsed: f32,
-    pub duration: f32,
-}
-
-impl PawnMovement {
-    pub fn idle(position: Vec3) -> Self {
-        Self {
-            from: position,
-            to: position,
-            elapsed: MOVE_DURATION,
-            duration: MOVE_DURATION,
-        }
-    }
-
-    pub fn is_moving(&self) -> bool {
-        self.elapsed < self.duration
-    }
-}
-
 /// Marker for a hostile NPC.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Enemy {
-    /// How often this enemy takes another step toward the player.
-    pub move_interval: f32,
+    /// Movement speed in tiles per second.
+    pub speed: f32,
 
-    /// Accumulated time since the last movement.
-    pub move_timer: f32,
-
-    /// Damage dealt upon reaching the player.
+    /// Damage dealt per attack once in range.
     pub damage: f32,
+
+    /// Minimum time between attacks.
+    pub attack_cooldown: f32,
+
+    /// Time remaining before this enemy can attack again.
+    pub attack_timer: f32,
 }
 
 impl Default for Enemy {
     fn default() -> Self {
         Self {
-            move_interval: 2.5,
-            move_timer: 0.0,
+            speed: 1.6,
             damage: 10.0,
+            attack_cooldown: 1.0,
+            attack_timer: 0.0,
         }
     }
 }
 
 /// Spawn the single player pawn.
 fn setup_pawn(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let start = GridPosition::new(3, 3);
+    let start = Vec2::new(0.0, 0.0);
     let screen = grid_to_screen(start.x, start.y);
-
     let position = Vec3::new(screen.x, screen.y, depth_z(start.x, start.y, Z_LAYER_PAWN));
 
     commands.spawn((
@@ -149,104 +142,82 @@ fn setup_pawn(mut commands: Commands, asset_server: Res<AssetServer>) {
             needs: PawnNeeds::default(),
         },
         PlayerPawn,
-        start,
-        PawnMovement::idle(position),
+        WorldPosition(start),
+        GridPosition::new(0, 0),
     ));
 }
 
-/// Convert keyboard input into one discrete grid step.
+/// Move the pawn freely in any direction, with no grid-snapping and no
+/// cooldown between inputs.
 ///
-/// W / Up    = y - 1
-/// S / Down  = y + 1
-/// A / Left  = x - 1
-/// D / Right = x + 1
-fn pawn_input(
+/// Each axis is resolved independently against terrain collision, so the
+/// pawn slides along an obstacle's edge instead of stopping dead the moment
+/// either axis alone would intersect something solid.
+fn pawn_movement(
+    time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     map: Res<MapData>,
-    mut pawn_q: Query<(&mut GridPosition, &mut PawnMovement, &Transform), With<PlayerPawn>>,
+    mut pawn_q: Query<(&mut WorldPosition, &mut Transform), With<PlayerPawn>>,
 ) {
-    let Ok((mut grid, mut movement, transform)) = pawn_q.single_mut() else {
+    let Ok((mut world_position, mut transform)) = pawn_q.single_mut() else {
         return;
     };
 
-    // Do not queue arbitrary movement while the pawn is still
-    // interpolating toward the previous tile.
-    if movement.is_moving() {
+    let mut direction = Vec2::ZERO;
+
+    if keyboard.pressed(KeyCode::KeyW) || keyboard.pressed(KeyCode::ArrowUp) {
+        direction.y -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyS) || keyboard.pressed(KeyCode::ArrowDown) {
+        direction.y += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyA) || keyboard.pressed(KeyCode::ArrowLeft) {
+        direction.x -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyD) || keyboard.pressed(KeyCode::ArrowRight) {
+        direction.x += 1.0;
+    }
+
+    if direction == Vec2::ZERO {
         return;
     }
 
-    let mut delta = IVec2::ZERO;
+    direction = direction.normalize();
 
-    if keyboard.just_pressed(KeyCode::KeyW) || keyboard.just_pressed(KeyCode::ArrowUp) {
-        delta.y -= 1;
-    } else if keyboard.just_pressed(KeyCode::KeyS) || keyboard.just_pressed(KeyCode::ArrowDown) {
-        delta.y += 1;
-    } else if keyboard.just_pressed(KeyCode::KeyA) || keyboard.just_pressed(KeyCode::ArrowLeft) {
-        delta.x -= 1;
-    } else if keyboard.just_pressed(KeyCode::KeyD) || keyboard.just_pressed(KeyCode::ArrowRight) {
-        delta.x += 1;
+    let delta = direction * PAWN_SPEED * time.delta_secs();
+    let mut position = world_position.0;
+
+    let candidate_x = Vec2::new(position.x + delta.x, position.y);
+    if !is_position_blocked(&map, candidate_x, PAWN_COLLISION_RADIUS) {
+        position.x = candidate_x.x;
     }
 
-    if delta == IVec2::ZERO {
-        return;
+    let candidate_y = Vec2::new(position.x, position.y + delta.y);
+    if !is_position_blocked(&map, candidate_y, PAWN_COLLISION_RADIUS) {
+        position.y = candidate_y.y;
     }
 
-    let target_x = grid.x + delta.x;
-    let target_y = grid.y + delta.y;
+    world_position.0 = position;
 
-    if !map.in_bounds(target_x, target_y) {
-        return;
-    }
-
-    let Some(tile) = map.get(target_x, target_y) else {
-        return;
-    };
-
-    if !tile.is_walkable() {
-        return;
-    }
-
-    grid.x = target_x;
-    grid.y = target_y;
-
-    let target = grid_to_screen(target_x, target_y);
-
-    movement.from = transform.translation;
-    movement.to = Vec3::new(
-        target.x,
-        target.y,
-        depth_z(target_x, target_y, Z_LAYER_PAWN),
-    );
-    movement.elapsed = 0.0;
-    movement.duration = MOVE_DURATION;
+    let screen = grid_to_screen(position.x, position.y);
+    transform.translation.x = screen.x;
+    transform.translation.y = screen.y;
+    transform.translation.z = depth_z(position.x, position.y, Z_LAYER_PAWN);
 }
 
-/// Smooth the pawn's transform toward its current grid coordinate.
-fn smooth_pawn_movement(
-    time: Res<Time>,
-    mut pawn_q: Query<(&mut Transform, &mut PawnMovement), With<PlayerPawn>>,
-) {
-    let Ok((mut transform, mut movement)) = pawn_q.single_mut() else {
+/// Keep the player's [`GridPosition`] matching their continuous position,
+/// for the benefit of tile-based systems (harvesting, sleeping checks).
+fn sync_grid_position(mut pawn_q: Query<(&WorldPosition, &mut GridPosition), With<PlayerPawn>>) {
+    let Ok((world_position, mut grid)) = pawn_q.single_mut() else {
         return;
     };
 
-    if !movement.is_moving() {
-        transform.translation = movement.to;
-        return;
-    }
+    let x = world_position.0.x.round() as i32;
+    let y = world_position.0.y.round() as i32;
 
-    movement.elapsed += time.delta_secs();
-
-    let t = (movement.elapsed / movement.duration).clamp(0.0, 1.0);
-
-    // Smoothstep interpolation.
-    let smooth_t = t * t * (3.0 - 2.0 * t);
-
-    transform.translation = movement.from.lerp(movement.to, smooth_t);
-
-    if t >= 1.0 {
-        transform.translation = movement.to;
-        movement.elapsed = movement.duration;
+    if grid.x != x || grid.y != y {
+        grid.x = x;
+        grid.y = y;
     }
 }
 
@@ -269,7 +240,7 @@ fn tick_needs(
         pawn.needs.health -= STARVATION_DAMAGE_PER_SECOND * dt;
     }
 
-    let current_tile = map.get(position.x, position.y).unwrap_or(Tile::Grass);
+    let current_tile = map.get(position.x, position.y);
 
     if pawn.needs.hunger < 20.0 || pawn.needs.energy < 20.0 {
         pawn.needs.mood -= LOW_NEED_MOOD_LOSS_PER_SECOND * dt;
@@ -310,9 +281,7 @@ fn harvest_adjacent(
         let x = pawn_position.x + dx;
         let y = pawn_position.y + dy;
 
-        let Some(tile) = map.get(x, y) else {
-            continue;
-        };
+        let tile = map.get(x, y);
 
         match tile {
             Tile::Tree => {
@@ -367,12 +336,28 @@ impl Plugin for PawnPlugin {
         app.add_systems(Startup, setup_pawn).add_systems(
             Update,
             (
-                pawn_input,
-                smooth_pawn_movement,
+                pawn_movement,
+                sync_grid_position,
                 tick_needs,
                 harvest_adjacent,
                 receive_damage,
-            ),
+            )
+                .chain(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_position_adjacency() {
+        let a = GridPosition::new(3, 3);
+        let b = GridPosition::new(3, 4);
+        let c = GridPosition::new(5, 5);
+
+        assert!(a.adjacent_to(b));
+        assert!(!a.adjacent_to(c));
     }
 }
